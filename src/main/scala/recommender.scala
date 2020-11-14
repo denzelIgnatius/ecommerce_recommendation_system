@@ -1,6 +1,6 @@
 import org.apache.spark.ml.evaluation.RegressionEvaluator
 import org.apache.spark.ml.recommendation.ALS
-import org.apache.spark.mllib.evaluation.{RankingMetrics, RegressionMetrics}
+import org.apache.spark.mllib.evaluation.RankingMetrics
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.functions.{col, expr}
 import org.apache.spark.sql.types._
@@ -12,6 +12,8 @@ object recommender {
       .master("local").appName("ecommerce_recommendation").getOrCreate
     import spark.implicits._
     spark.sparkContext.setLogLevel("ERROR")
+    spark.conf.set("spark.sql.shuffle.partitions",10)
+    spark.conf.set("spark.port.maxRetries","100")
     val data = spark.read.format("csv").option("header", "true")
       .load("data/ratings_Beauty.csv")
 
@@ -25,16 +27,6 @@ object recommender {
       .zipWithIndex().toDF("UserId", "UniqueUserId")
       .withColumn("UniqueUserId", col("UniqueUserId").cast(IntegerType))
 
-//    println("Product Id")
-//    println(productIds.select("ProductId").distinct().count())
-//    println(productIds.count())
-//    println(productIds.agg(max("UniqueProdID")))
-//    println(productIds.agg(max("UniqueProdID")).show())
-//    println("User Id")
-//    println(userIds.select("UserId").distinct().count())
-//    println(userIds.count())
-//    println(userIds.agg(max("UniqueUserId")))
-//    println(userIds.agg(max("UniqueUserId")).show())
     val userData = data.join(userIds,Seq("UserId"))
     val joinedData = userData.join(productIds, Seq("ProductId"))
     val finalData = joinedData.withColumn("Rating", col("Rating").cast(FloatType))
@@ -48,7 +40,6 @@ object recommender {
     als.setColdStartStrategy("drop")
     val alsModel = als.fit(training)
     val predictions = alsModel.transform(test)
-    println(predictions.show(5))
 
     val evaluator = new RegressionEvaluator()
       .setMetricName("rmse")
@@ -57,17 +48,33 @@ object recommender {
     val rmse = evaluator.evaluate(predictions)
     println(s"Root-mean-square error = $rmse")
 
+    als.setNonnegative(true)
+    val alsModel2 = als.fit(training)
+    val predictions2 = alsModel2.transform(test)
 
-    val regComparison = predictions.select("Rating", "prediction")
-      .rdd.map(x => (x.getFloat(0).toDouble,x.getFloat(1).toDouble))
-    val metrics = new RegressionMetrics(regComparison)
+    val rmse2 = evaluator.evaluate(predictions2)
+    println(s"Root-mean-square error after Non negative set to true = $rmse2")
+
+    als.setRegParam(0.1)
+    val alsModel3 = als.fit(training)
+    val predictions3 = alsModel3.transform(test)
+
+    val rmse3 = evaluator.evaluate(predictions3)
+    println(s"Root-mean-square error after reg param set to 0.1 = $rmse3")
+
+    als.setRegParam(1)
+    val alsModel4 = als.fit(training)
+    val predictions4 = alsModel4.transform(test)
+
+    val rmse4 = evaluator.evaluate(predictions4)
+    println(s"Root-mean-square error after reg param set to 1 = $rmse4")
     
-    val perUserActual = predictions
-      .where("rating > 2.5")
+    val perUserActual = predictions4
+      .where("rating > 2")
       .groupBy("UniqueUserId")
       .agg(expr("collect_set(UniqueProdID) as Products"))
 
-    val perUserPredictions = predictions
+    val perUserPredictions = predictions4
       .orderBy(col("UniqueUserId"), col("prediction").desc)
       .groupBy("UniqueUserId")
       .agg(expr("collect_list(UniqueProdID) as Products"))
@@ -78,7 +85,10 @@ object recommender {
         row(2).asInstanceOf[Seq[Integer]].toArray.take(15)
       ))
     val ranks = new RankingMetrics(perUserActualvPred.rdd)
-    ranks.meanAveragePrecision
-    ranks.precisionAt(5)
+    val map = ranks.meanAveragePrecision
+    val rankprec = ranks.precisionAt(5)
+    println(s"Mean Average Precision = $map")
+    println(s"Average Precision at Rank 5 = $rmse4")
+    spark.stop()
   }
 }
